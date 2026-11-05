@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Diana & Loki Voice Assistant</title>
+<style>
+:root{--green:#39ff14;--bg:#050805;--panel:#101610;--muted:#a8b5a8}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;background:var(--bg);color:#fff;font-family:Arial,sans-serif;display:flex;justify-content:center}
+.app{width:min(100%,480px);min-height:100vh;padding:18px 18px 28px;display:flex;flex-direction:column;align-items:center;position:relative;overflow:hidden}
+h1{font-size:22px;letter-spacing:1px;margin:8px 0 4px}
+.sub{font-size:12px;color:var(--muted);margin-bottom:12px}
+.controls{width:100%;display:flex;gap:10px;margin:8px 0 10px}
+select,button{background:#101610;color:white;border:1px solid #2f7e2a;border-radius:12px;padding:12px;font-size:14px}
+select{flex:1;min-width:0}
+.avatar-wrap{height: min(54vh,520px);width:100%;display:flex;align-items:center;justify-content:center;position:relative}
+.avatar{height:100%;max-width:100%;object-fit:contain;filter:drop-shadow(0 0 14px #1c7c19)}
+.avatar-placeholder{width:210px;height:300px;border:2px solid var(--green);border-radius:100px 100px 35px 35px;display:grid;place-items:center;color:var(--green);font-size:22px;text-align:center;padding:20px}
+.wave{height:58px;width:100%;display:flex;align-items:center;justify-content:center;gap:4px;margin:2px 0 18px}
+.wave i{display:block;width:4px;height:8px;border-radius:5px;background:var(--green);opacity:.8;transition:height .08s}
+.wave.active i{animation:pulse .55s ease-in-out infinite alternate}
+.wave i:nth-child(3n){animation-delay:.15s}.wave i:nth-child(4n){animation-delay:.3s}
+@keyframes pulse{from{height:6px}to{height:38px}}
+.bottom{width:100%;display:flex;align-items:center;gap:12px}
+.speak{flex:1;border:2px solid var(--green);border-radius:40px;padding:16px;background:#050805;box-shadow:0 0 15px #1d8f16;color:white;font-size:18px;font-weight:bold}
+.plus-wrap{position:relative}
+.plus{width:58px;height:58px;border:2px solid var(--green);border-radius:50%;font-size:30px;padding:0;color:white;box-shadow:0 0 12px #1d8f16}
+.menu{position:absolute;right:0;bottom:68px;width:166px;background:#101610;border:1.5px solid var(--green);border-radius:14px;padding:7px;display:none;box-shadow:0 0 12px #146d10}
+.menu.open{display:block}
+.menu button{width:100%;border:0;text-align:left;background:transparent;padding:11px;font-size:14px}
+.status{min-height:20px;margin-top:12px;font-size:12px;color:var(--muted);text-align:center}
+video{display:none;width:100%;max-height:180px;border:1px solid var(--green);border-radius:12px;margin-top:12px}
+@media(max-height:700px){.avatar-wrap{height:43vh}.wave{margin-bottom:10px}}
+</style>
+</head>
+<body>
+<main class="app">
+  <h1>VOICE ASSISTANT</h1>
+  <div class="sub">Diana & Loki</div>
+
+  <div class="controls">
+    <select id="character" aria-label="Choose assistant">
+      <option value="Diana">Diana</option><option value="Loki">Loki</option>
+    </select>
+    <select id="language" aria-label="Choose language">
+      <option value="en-US">English</option><option value="ta-IN">தமிழ்</option>
+      <option value="hi-IN">हिन्दी</option><option value="ml-IN">മലയാളം</option>
+    </select>
+  </div>
+
+  <section class="avatar-wrap" aria-label="Assistant avatar">
+    <!-- Replace these paths with your own avatar image files. -->
+    <img id="avatar" class="avatar" src="diana.png" alt="Diana avatar">
+    <div id="avatarFallback" class="avatar-placeholder" hidden>3D AVATAR<br><small>Add avatar image</small></div>
+  </section>
+
+  <div id="wave" class="wave" aria-label="Voice activity visualizer"></div>
+
+  <div class="bottom">
+    <button id="speakBtn" class="speak">🎙 &nbsp; SPEAK</button>
+    <div class="plus-wrap">
+      <button id="plusBtn" class="plus" aria-label="Open attachments">+</button>
+      <div id="menu" class="menu">
+        <button data-action="photo">▧ &nbsp; Photo</button>
+        <button data-action="camera">▣ &nbsp; Camera</button>
+        <button data-action="document">▤ &nbsp; Document</button>
+      </div>
+    </div>
+  </div>
+  <input id="photoInput" type="file" accept="image/*" hidden>
+  <input id="docInput" type="file" accept=".pdf,.doc,.docx,.txt" hidden>
+  <video id="cameraPreview" autoplay playsinline muted></video>
+  <div id="status" class="status" role="status">Ready</div>
+</main>
+
+<script>
+(() => {
+  "use strict";
+
+  const $ = id => document.getElementById(id);
+  const character = $("character"), language = $("language");
+  const avatar = $("avatar"), fallback = $("avatarFallback");
+  const wave = $("wave"), speakBtn = $("speakBtn");
+  const plusBtn = $("plusBtn"), menu = $("menu"), status = $("status");
+  const cameraPreview = $("cameraPreview");
+  const photoInput = $("photoInput"), docInput = $("docInput");
+
+  // One monotonically increasing version invalidates stale async work.
+  let stateVersion = 0;
+  let listening = false;
+  let recognition = null;
+  let cameraStream = null;
+  let audioStream = null;
+  let audioContext = null;
+  let animationFrame = 0;
+  let utterance = null;
+
+  // Build a restrained green waveform.
+  for (let i = 0; i < 49; i++) {
+    const bar = document.createElement("i");
+    wave.appendChild(bar);
+  }
+  const bars = [...wave.children];
+
+  function setStatus(message) { status.textContent = message; }
+
+  function stopTTS() {
+    if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+    utterance = null;
+  }
+
+  function stopRecognition() {
+    listening = false;
+    if (recognition) {
+      recognition.onresult = recognition.onerror = recognition.onend = null;
+      try { recognition.stop(); } catch (_) {}
+      recognition = null;
+    }
+    speakBtn.textContent = "🎙  SPEAK";
+  }
+
+  function stopVisualizer() {
+    cancelAnimationFrame(animationFrame);
+    animationFrame = 0;
+    wave.classList.remove("active");
+    bars.forEach(b => b.style.height = "8px");
+    if (audioContext) {
+      const ctx = audioContext;
+      audioContext = null;
+      try { ctx.close(); } catch (_) {}
+    }
+    if (audioStream) {
+      audioStream.getTracks().forEach(track => track.stop());
+      audioStream = null;
+    }
+  }
+
+  function stopCamera() {
+    if (cameraStream) {
+      cameraStream.getTracks().forEach(track => track.stop());
+      cameraStream = null;
+    }
+    cameraPreview.pause();
+    cameraPreview.srcObject = null;
+    cameraPreview.style.display = "none";
+  }
+
+  function cleanupAll() {
+    stopRecognition();
+    stopTTS();
+    stopVisualizer();
+    stopCamera();
+    wave.classList.remove("active");
+  }
+
+  function setCharacter(name) {
+    const version = ++stateVersion;
+    cleanupAll();
+    menu.classList.remove("open");
+    const imagePath = name.toLowerCase() + ".png";
+    avatar.hidden = false;
+    fallback.hidden = true;
+    avatar.src = imagePath;
+    avatar.alt = name + " avatar";
+    avatar.onerror = () => {
+      if (version !== stateVersion) return;
+      avatar.hidden = true;
+      fallback.hidden = false;
+      fallback.innerHTML = name + "<br><small>Add " + name.toLowerCase() + ".png</small>";
+    };
+    setStatus(name + " is ready");
+  }
+
+  function speakText(text) {
+    if (!("speechSynthesis" in window)) {
+      setStatus("Text-to-speech is not supported in this browser.");
+      return;
+    }
+    stopTTS();
+    const version = stateVersion;
+    const msg = new SpeechSynthesisUtterance(text);
+    msg.lang = language.value;
+    msg.rate = 0.95;
+    msg.pitch = character.value === "Diana" ? 1.05 : 0.9;
+    utterance = msg;
+    msg.onstart = () => {
+      if (version !== stateVersion) return;
+      wave.classList.add("active");
+      setStatus(character.value + " is speaking");
+    };
+    msg.onend = msg.onerror = () => {
+      if (version !== stateVersion) return;
+      utterance = null;
+      wave.classList.remove("active");
+      setStatus("Ready");
+    };
+    window.speechSynthesis.speak(msg);
+  }
+
+  async function startVisualizer() {
+    const version = stateVersion;
+    stopVisualizer();
+    try {
+      audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (version !== stateVersion || !listening) {
+        audioStream.getTracks().forEach(t => t.stop());
+        audioStream = null;
+        return;
+      }
+      audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      const source = audioContext.createMediaStreamSource(audioStream);
+      const analyser = audioContext.createAnalyser();
+      analyser.fftSize = 128;
+      source.connect(analyser);
+      const data = new Uint8Array(analyser.frequencyBinCount);
+      wave.classList.add("active");
+
+      const draw = () => {
+        if (version !== stateVersion || !listening || !audioContext) return;
+        analyser.getByteFrequencyData(data);
+        bars.forEach((bar, i) => {
+          const value = data[Math.floor(i * data.length / bars.length)] || 0;
+          bar.style.height = (5 + value * 0.22) + "px";
+        });
+        animationFrame = requestAnimationFrame(draw);
+      };
+      draw();
+    } catch (error) {
+      setStatus("Microphone visualizer unavailable. Check microphone permission.");
+    }
+  }
+
+  function startListening() {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      setStatus("Speech recognition is unavailable. Try Chrome on Android.");
+      return;
+    }
+    cleanupAll();
+    const version = ++stateVersion;
+    listening = true;
+    speakBtn.textContent = "■  STOP";
+    const rec = new SpeechRecognition();
+    recognition = rec;
+    rec.lang = language.value;
+    rec.continuous = false;
+    rec.interimResults = false;
+
+    rec.onresult = event => {
+      if (version !== stateVersion || recognition !== rec) return;
+      const spoken = event.results?.[0]?.[0]?.transcript || "";
+      stopRecognition();
+      stopVisualizer();
+      setStatus(spoken ? "You said: " + spoken : "I did not hear anything.");
+      if (spoken) speakText(character.value + " heard you say: " + spoken);
+    };
+    rec.onerror = event => {
+      if (version !== stateVersion) return;
+      setStatus("Voice input error: " + event.error);
+      stopRecognition();
+      stopVisualizer();
+    };
+    rec.onend = () => {
+      if (version !== stateVersion) return;
+      if (listening) {
+        stopRecognition();
+        stopVisualizer();
+        setStatus("Listening ended");
+      }
+    };
+    startVisualizer();
+    try { rec.start(); setStatus("Listening… speak now"); }
+    catch (_) { stopRecognition(); stopVisualizer(); setStatus("Could not start microphone."); }
+  }
+
+  async function openCamera() {
+    const version = stateVersion;
+    stopCamera();
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setStatus("Camera is not supported in this browser.");
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+      if (version !== stateVersion) {
+        stream.getTracks().forEach(t => t.stop());
+        return;
+      }
+      cameraStream = stream;
+      cameraPreview.srcObject = stream;
+      cameraPreview.style.display = "block";
+      setStatus("Camera is on. Close or change screen to stop it.");
+    } catch (_) {
+      setStatus("Camera permission denied or camera unavailable.");
+    }
+  }
+
+  character.addEventListener("change", () => setCharacter(character.value));
+  language.addEventListener("change", () => {
+    ++stateVersion;
+    cleanupAll();
+    setStatus("Language set to " + language.options[language.selectedIndex].text);
+  });
+
+  speakBtn.addEventListener("click", () => {
+    if (listening) {
+      ++stateVersion;
+      cleanupAll();
+      setStatus("Stopped");
+    } else {
+      startListening();
+    }
+  });
+
+  plusBtn.addEventListener("click", () => menu.classList.toggle("open"));
+  menu.addEventListener("click", event => {
+    const action = event.target.closest("button")?.dataset.action;
+    if (!action) return;
+    menu.classList.remove("open");
+    if (action === "photo") photoInput.click();
+    if (action === "document") docInput.click();
+    if (action === "camera") openCamera();
+  });
+  photoInput.addEventListener("change", () => {
+    if (photoInput.files[0]) setStatus("Photo selected: " + photoInput.files[0].name);
+  });
+  docInput.addEventListener("change", () => {
+    if (docInput.files[0]) setStatus("Document selected: " + docInput.files[0].name);
+  });
+
+  // Cleanup on navigation, tab close, and page being backgrounded.
+  window.addEventListener("pagehide", cleanupAll);
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) cleanupAll();
+  });
+  window.addEventListener("beforeunload", cleanupAll);
+
+  setCharacter("Diana");
+})();
+</script>
+</body>
+</html>
